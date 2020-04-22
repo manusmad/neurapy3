@@ -331,9 +331,7 @@ def extract_nrd_ec(fname, ftsname, fttlname, fchanname, channel_list, channels=6
                     these_packets = these_packets[:max_good_packets]
 
             if these_packets.size > 0:
-                ts = np.array(
-                    (these_packets['timestamp high'].astype('uint64') << 32) | (these_packets['timestamp low']),
-                    dtype='uint64')
+                ts = (these_packets['timestamp high'].astype('uint64') << 32) | these_packets['timestamp low']
                 bad_idx = -1
                 if last_ts > ts[0]:  # Time stamps out of order at buffer boundary
                     bad_idx = 0
@@ -461,7 +459,7 @@ def extract_nrd_fast(fname, ftsname, fttlname, fchanname, channel_list, channels
 
         these_packets = np.fromfile(f, dtype=nrd_packet, count=buffer_size)
         while these_packets.size > 0:
-            ts = np.array((these_packets['timestamp high'] << 32) | (these_packets['timestamp low']), dtype='uint64')
+            ts = (these_packets['timestamp high'].astype('uint64') << 32) | these_packets['timestamp low']
             ts.tofile(fts)
             these_packets['ttl'].tofile(fttl)
             for idx, ch in enumerate(channel_list):
@@ -480,13 +478,12 @@ def extract_nrd_fast(fname, ftsname, fttlname, fchanname, channel_list, channels
     logger.info('Extracted {:d} packets'.format(pkt_cnt))
 
 
-def nrd2mda_fast(fname, fmdaname, channel_list, channels=64, max_pkts=-1, buffer_size=10000, start_ts=-1, stop_ts=-1):
+def nrd2mda_fast(fname, fmdaname, channel_list, max_pkts=-1, buffer_size=10000, start_ts=-1, stop_ts=-1):
     """Read and write out selected raw traces from the .nrd file.
     Inputs:
       fname - name of nrd file
       fmdaname - output mda file name
       channel_list - Which AD channels to convert.
-      channels - total channels in the system
       max_pkts - total packets to read. If set to -1 then read all packets
       buffer_size   - how many chunks to read at a time.
       start_ts - Neuralynx timestamp above which to write to file. If set to -1 then start_ts is start of nrd file
@@ -500,39 +497,21 @@ def nrd2mda_fast(fname, fmdaname, channel_list, channels=64, max_pkts=-1, buffer
     import logging
     logging.basicConfig(level=logging.DEBUG)
 
-    channels = 64
     fname = '/Users/kghose/Research/2013/Projects/Workingmemory/Data/NeuraLynx/2013-01-25_14-53-04/DigitalLynxRawDataFile.nrd'
     channel_list = [0,1,2]
 
     fmdaname = 'out.mda'
     start_ts = -1
     stop_ts = -1
-    lynxio.nrd2mda_fast(fname, fmdaname, channel_list, channels, max_pkts=1000, start_ts, stop_ts)
+    lynxio.nrd2mda_fast(fname, fmdaname, channel_list, max_pkts=1000, start_ts, stop_ts)
     ----------------------------------------------------------------------------------------------------------------------
 
     In my experience STX, CRC, timestamp errors and garbage bytes between packets are extremely rare in a properly working system.
     This function eschews any kind of checks on the data read and just converts the packets.
     If you suspect that your data has dropped packets, crc or other issues you should try the regular version of this function.
     You can note if you have packet errors from your Cheetah software.
-
-    Personally, I recommend using the _ec version of the code. It runs fast enough.
     """
     logger.info('Notice: you are using the fast version of the extractor. No error checks are done')
-
-    # nrd packet format
-    nrd_packet = np.dtype([
-        ('stx', 'i'),
-        ('pkt_id', 'i'),
-        ('pkt_data_size', 'i'),
-        ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
-        ('timestamp low', 'I'),
-        ('status', 'i'),
-        ('ttl', 'I'),
-        ('extra', '10i'),
-        ('data', '{:d}i'.format(channels)),
-        ('crc', 'i')
-    ])
-    # packet_size = nrd_packet.itemsize
 
     pkt_cnt = 0
     if max_pkts != -1:  # An insidious bug was killed here!
@@ -553,6 +532,25 @@ def nrd2mda_fast(fname, fmdaname, channel_list, channels=64, max_pkts=-1, buffer
         hdr = read_header(f)
         logger.info('File header: {:s}'.format(hdr))
 
+        # Find number of channels from header
+        hdr = hdr.split()
+        channels = int(hdr[hdr.index('-NumADChannels') + 1])
+
+        # nrd packet format
+        nrd_packet = np.dtype([
+            ('stx', 'i'),
+            ('pkt_id', 'i'),
+            ('pkt_data_size', 'i'),
+            ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
+            ('timestamp low', 'I'),
+            ('status', 'i'),
+            ('ttl', 'I'),
+            ('extra', '10i'),
+            ('data', '{:d}i'.format(channels)),
+            ('crc', 'i')
+        ])
+        # packet_size = nrd_packet.itemsize
+
         # Read in 32bit increments until the magic number is found
         pkt = f.read(4)
         while len(pkt) == 4:
@@ -562,9 +560,10 @@ def nrd2mda_fast(fname, fmdaname, channel_list, channels=64, max_pkts=-1, buffer
             pkt = f.read(4)
 
         these_packets = np.fromfile(f, dtype=nrd_packet, count=buffer_size)
-        while these_packets.size > 0:
-            ts = np.array((these_packets['timestamp high'] << 32) | (these_packets['timestamp low']), dtype='uint64')
-            ts_idx = np.argwhere(np.logical_and(start_ts <= ts, ts <= stop_ts))
+        ts = 0
+        while these_packets.size > 0 and np.any(ts <= stop_ts):
+            ts = (these_packets['timestamp high'].astype('uint64') << 32) | these_packets['timestamp low']
+            ts_idx = np.argwhere(np.logical_and(ts >= start_ts, ts <= stop_ts))
             these_packets['data'][ts_idx, channel_list].tofile(fmda)
 
             pkt_cnt += these_packets.size
