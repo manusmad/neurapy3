@@ -477,6 +477,114 @@ def extract_nrd_fast(fname, ftsname, fttlname, fchanname, channel_list, channels
 
     logger.info('Extracted {:d} packets'.format(pkt_cnt))
 
+def nrd2mda_epochs(fnrdname, fdefaultsname, fmdaprefix, channel_dict, epoch_names, buffer_size=10000):
+    """Read raw traces from the nrd file and split into mda files based on the epochs from the defaults file and the
+        channel config from the channel config file.
+
+        Inputs:
+            fnrdname - name of the nrd file
+            fdefaultsname - name of the defaults file
+            fmdaprefix - mda file prefix - filenames will be <fmdaprefix><epoch>.nt<n>.mda
+            channel_dict - dict with keys as tetrode numbers/names and values as channels to include in each ntrode file
+            epoch_names - names of epochs to decode - these must be contained in the defaults file
+            buffer_size - how many chunks to read at a time
+        Outputs:
+          Data are written to file
+
+        Manu S. Madhav
+        30-Apr-20
+    """
+
+    if isinstance(epoch_names, str):
+        epoch_names = [epoch_names]
+
+    pkt_cnt = 0
+
+    # Open and parse defaults file
+    def_epochs = {}
+    with open(fdefaultsname, 'r') as f:
+        def_lines = f.readlines()
+        for line in def_lines:
+            if line.startswith('"Epoch"'):
+                name = line.strip().split(',')[1].split(':')[0].strip('"')
+                start_ts, stop_ts = map(int, line.strip().split(',')[1].split(':')[1].strip('"').split())
+                def_epochs.update({name: {'start_ts': start_ts, 'stop_ts': stop_ts}})
+
+    mda_epochs = {k: v for k, v in def_epochs.items() if k in epoch_names}
+    max_stop_ts = max([v['stop_ts'] for v in mda_epochs.values()])
+
+    for epoch in mda_epochs:
+        nts = {}
+
+        for nt in channel_dict:
+            nts[nt] = {}
+
+            nts[nt]['chans'] = channel_dict[nt]
+            mda_filename = '{}{}.nt{:d}.mda'.format(fmdaprefix, epoch, nt)
+            mda_fid = open(mda_filename, 'wb')
+
+            # Write mda header
+            num_channels = len(channel_dict[nt])
+            mda_hdr = np.array([-5, 4, 2, num_channels, 0], dtype='i')
+            mda_hdr.tofile(mda_fid)
+
+            nts[nt]['fid'] = mda_fid
+            nts[nt]['pkt_cnt'] = 0
+
+        mda_epochs[epoch]['nts'] = nts
+
+    with open(fnrdname, 'rb') as f:
+        hdr = read_header(f)
+        logger.info('File header: {:s}'.format(hdr))
+
+        # Find number of channels from header
+        hdr = hdr.split()
+        channels = int(hdr[hdr.index('-NumADChannels') + 1])
+
+        # nrd packet format
+        nrd_packet = np.dtype([
+            ('stx', 'i'),
+            ('pkt_id', 'i'),
+            ('pkt_data_size', 'i'),
+            ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
+            ('timestamp low', 'I'),
+            ('status', 'i'),
+            ('ttl', 'I'),
+            ('extra', '10i'),
+            ('data', '{:d}i'.format(channels)),
+            ('crc', 'i')
+        ])
+        # packet_size = nrd_packet.itemsize
+
+        # Read in 32bit increments until the magic number is found
+        pkt = f.read(4)
+        while len(pkt) == 4:
+            if pkt == b'\x00\x08\x00\x00':  # Magic number 2048 0x0800
+                f.seek(-4, 1)  # Realign
+                break
+            pkt = f.read(4)
+
+        these_packets = np.fromfile(f, dtype=nrd_packet, count=buffer_size)
+        ts = 0
+        while these_packets.size > 0 and np.any(ts <= max_stop_ts):
+            ts = (these_packets['timestamp high'].astype('uint64') << 32) | these_packets['timestamp low']
+
+            for epoch in mda_epochs.values():
+                ts_idx = np.argwhere(np.logical_and(ts >= epoch['start_ts'], ts <= epoch['stop_ts']))
+                if ts_idx.size != 0:
+                    for nt in epoch['nts'].values():
+                        these_packets['data'][ts_idx, nt['chans']].tofile(nt['fid'])
+                        nt['pkt_cnt'] += these_packets.size
+
+            these_packets = np.fromfile(f, dtype=nrd_packet, count=buffer_size)
+
+    # Rewrite packet size in header.
+    for epoch in mda_epochs.values():
+        for nt in epoch['nts'].values():
+            nt['fid'].seek(16)
+            np.array(nt['pkt_cnt'], dtype='i').tofile(nt['fid'])
+            nt['fid'].close()
+
 
 def nrd2mda_fast(fname, fmdaname, channel_list, max_pkts=-1, buffer_size=10000, start_ts=-1, stop_ts=-1):
     """Read and write out selected raw traces from the .nrd file.
