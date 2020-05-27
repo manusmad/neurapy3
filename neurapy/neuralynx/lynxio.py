@@ -6,6 +6,56 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Packet formats as globals
+# nev packet format
+nev_packet = np.dtype([
+    ('nstx', 'h'),
+    ('npkt_id', 'h'),
+    ('npkt_data_size', 'h'),
+    ('timestamp', 'Q'),
+    ('eventid', 'h'),
+    ('nttl', 'H'),
+    ('ncrc', 'h'),
+    ('ndummy1', 'h'),
+    ('ndummy2', 'h'),
+    ('dnExtra', '8i'),
+    ('eventstring', '128c')
+])
+
+
+# nrd packet format
+def make_nrd_packet(channels):
+    nrd_packet = np.dtype([
+        ('stx', 'i'),
+        ('pkt_id', 'i'),
+        ('pkt_data_size', 'i'),
+        ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
+        ('timestamp low', 'I'),
+        ('status', 'i'),
+        ('ttl', 'I'),
+        ('extra', '10i'),
+        ('data', '{:d}i'.format(channels)),
+        ('crc', 'i')
+    ])
+    return nrd_packet
+
+
+csc_packet = np.dtype([
+    ('timestamp', 'Q'),
+    ('chan', 'I'),
+    ('Fs', 'I'),
+    ('Ns', 'I'),
+    ('samp', '512h')
+])
+
+nse_packet = np.dtype([
+    ('timestamp', 'Q'),
+    ('saen', 'I'),
+    ('cellno', 'I'),
+    ('Features', '8I'),
+    ('waveform', '32h')
+])
+
 
 def read_header(fin):
     """Standard 16 kB header."""
@@ -37,13 +87,6 @@ def read_csc(fin, assume_same_fs=True):
     sampling frequency has not changed during the recording
     """
     hdr = read_header(fin)
-    csc_packet = np.dtype([
-        ('timestamp', 'Q'),
-        ('chan', 'I'),
-        ('Fs', 'I'),
-        ('Ns', 'I'),
-        ('samp', '512h')
-    ])
 
     data = np.fromfile(fin, dtype=csc_packet, count=-1)
     Fs = None
@@ -124,19 +167,7 @@ def read_nev(fin, parse_event_string=False):
         'eventstring' - Only is parse_event_string is set to True. This is a nicely formatted eventstring
     """
     hdr = read_header(fin)
-    nev_packet = np.dtype([
-        ('nstx', 'h'),
-        ('npkt_id', 'h'),
-        ('npkt_data_size', 'h'),
-        ('timestamp', 'Q'),
-        ('eventid', 'h'),
-        ('nttl', 'H'),
-        ('ncrc', 'h'),
-        ('ndummy1', 'h'),
-        ('ndummy2', 'h'),
-        ('dnExtra', '8i'),
-        ('eventstring', '128c')
-    ])
+
     data = np.fromfile(fin, dtype=nev_packet, count=-1)
     logger.debug('{:d} events'.format(data['timestamp'].size))
     if parse_event_string:
@@ -172,13 +203,6 @@ def read_nse(fin):
     """
 
     hdr = read_header(fin)
-    nse_packet = np.dtype([
-        ('timestamp', 'Q'),
-        ('saen', 'I'),
-        ('cellno', 'I'),
-        ('Features', '8I'),
-        ('waveform', '32h')
-    ])
     data = np.fromfile(fin, dtype=nse_packet, count=-1)
     return {'header': hdr, 'packets': data}
 
@@ -250,20 +274,7 @@ def extract_nrd_ec(fname, ftsname, fttlname, fchanname, channel_list, channels=6
         return stop - start
 
     logger.info('Notice: you are using the slow version of the extractor. All error checks are done')
-
-    # nrd packet format
-    nrd_packet = np.dtype([
-        ('stx', 'i'),
-        ('pkt_id', 'i'),
-        ('pkt_data_size', 'i'),
-        ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
-        ('timestamp low', 'I'),
-        ('status', 'i'),
-        ('ttl', 'I'),
-        ('extra', '10i'),
-        ('data', '{:d}i'.format(channels)),
-        ('crc', 'i')
-    ])
+    nrd_packet = make_nrd_packet(channels)
     packet_size = nrd_packet.itemsize
 
     pkt_cnt = 0
@@ -419,21 +430,7 @@ def extract_nrd_fast(fname, ftsname, fttlname, fchanname, channel_list, channels
     Personally, I recommend using the _ec version of the code. It runs fast enough.
     """
     logger.info('Notice: you are using the fast version of the extractor. No error checks are done')
-
-    # nrd packet format
-    nrd_packet = np.dtype([
-        ('stx', 'i'),
-        ('pkt_id', 'i'),
-        ('pkt_data_size', 'i'),
-        ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
-        ('timestamp low', 'I'),
-        ('status', 'i'),
-        ('ttl', 'I'),
-        ('extra', '10i'),
-        ('data', '{:d}i'.format(channels)),
-        ('crc', 'i')
-    ])
-    # packet_size = nrd_packet.itemsize
+    nrd_packet = make_nrd_packet(channels)
 
     pkt_cnt = 0
     if max_pkts != -1:  # An insidious bug was killed here!
@@ -477,14 +474,14 @@ def extract_nrd_fast(fname, ftsname, fttlname, fchanname, channel_list, channels
 
     logger.info('Extracted {:d} packets'.format(pkt_cnt))
 
-def nrd2mda_epochs(fnrdname, fdefaultsname, fmdaprefix, channel_dict, epoch_names, buffer_size=10000):
+def nrd2mda_epochs(nrd_filename, def_filename, mda_prefix, channel_dict, epoch_names, buffer_size=10000):
     """Read raw traces from the nrd file and split into mda files based on the epochs from the defaults file and the
         channel config from the channel config file.
 
         Inputs:
-            fnrdname - name of the nrd file
-            fdefaultsname - name of the defaults file
-            fmdaprefix - mda file prefix - filenames will be <fmdaprefix><epoch>.nt<n>.mda
+            nrd_filename - name of the nrd file
+            def_filename - name of the defaults file
+            mda_prefix - mda file prefix - file names will be <mda_prefix><epoch>.nt<n>.mda
             channel_dict - dict with keys as tetrode numbers/names and values as channels to include in each ntrode file
             epoch_names - names of epochs to decode - these must be contained in the defaults file
             buffer_size - how many chunks to read at a time
@@ -498,11 +495,9 @@ def nrd2mda_epochs(fnrdname, fdefaultsname, fmdaprefix, channel_dict, epoch_name
     if isinstance(epoch_names, str):
         epoch_names = [epoch_names]
 
-    pkt_cnt = 0
-
     # Open and parse defaults file
     def_epochs = {}
-    with open(fdefaultsname, 'r') as f:
+    with open(def_filename, 'r') as f:
         def_lines = f.readlines()
         for line in def_lines:
             if line.startswith('"Epoch"'):
@@ -511,16 +506,20 @@ def nrd2mda_epochs(fnrdname, fdefaultsname, fmdaprefix, channel_dict, epoch_name
                 def_epochs.update({name: {'start_ts': start_ts, 'stop_ts': stop_ts}})
 
     mda_epochs = {k: v for k, v in def_epochs.items() if k in epoch_names}
+
+    if mda_epochs == {}:
+        logger.error('None of these epochs were found in the defaults file')
+        return -1
+
     max_stop_ts = max([v['stop_ts'] for v in mda_epochs.values()])
 
+    # Construct epoch parameter structure and open files for writing
     for epoch in mda_epochs:
         nts = {}
-
         for nt in channel_dict:
             nts[nt] = {}
-
             nts[nt]['chans'] = channel_dict[nt]
-            mda_filename = '{}{}.nt{:d}.mda'.format(fmdaprefix, epoch, nt)
+            mda_filename = '{}{}.nt{:d}.mda'.format(mda_prefix, epoch, nt)
             mda_fid = open(mda_filename, 'wb')
 
             # Write mda header
@@ -528,33 +527,22 @@ def nrd2mda_epochs(fnrdname, fdefaultsname, fmdaprefix, channel_dict, epoch_name
             mda_hdr = np.array([-5, 4, 2, num_channels, 0], dtype='i')
             mda_hdr.tofile(mda_fid)
 
+            # Save file identifier and initialize packet count
             nts[nt]['fid'] = mda_fid
             nts[nt]['pkt_cnt'] = 0
 
         mda_epochs[epoch]['nts'] = nts
 
-    with open(fnrdname, 'rb') as f:
+    # Start reading NRD file
+    with open(nrd_filename, 'rb') as f:
+        # Read and print header
         hdr = read_header(f)
         logger.info('File header: {:s}'.format(hdr))
 
         # Find number of channels from header
         hdr = hdr.split()
         channels = int(hdr[hdr.index('-NumADChannels') + 1])
-
-        # nrd packet format
-        nrd_packet = np.dtype([
-            ('stx', 'i'),
-            ('pkt_id', 'i'),
-            ('pkt_data_size', 'i'),
-            ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
-            ('timestamp low', 'I'),
-            ('status', 'i'),
-            ('ttl', 'I'),
-            ('extra', '10i'),
-            ('data', '{:d}i'.format(channels)),
-            ('crc', 'i')
-        ])
-        # packet_size = nrd_packet.itemsize
+        nrd_packet = make_nrd_packet(channels)
 
         # Read in 32bit increments until the magic number is found
         pkt = f.read(4)
@@ -584,6 +572,8 @@ def nrd2mda_epochs(fnrdname, fdefaultsname, fmdaprefix, channel_dict, epoch_name
             nt['fid'].seek(16)
             np.array(nt['pkt_cnt'], dtype='i').tofile(nt['fid'])
             nt['fid'].close()
+
+    return 0
 
 
 def nrd2mda_fast(fname, fmdaname, channel_list, max_pkts=-1, buffer_size=10000, start_ts=-1, stop_ts=-1):
@@ -620,6 +610,7 @@ def nrd2mda_fast(fname, fmdaname, channel_list, max_pkts=-1, buffer_size=10000, 
     You can note if you have packet errors from your Cheetah software.
     """
     logger.info('Notice: you are using the fast version of the extractor. No error checks are done')
+    nrd_packet = make_nrd_packet(channels)
 
     pkt_cnt = 0
     if max_pkts != -1:  # An insidious bug was killed here!
@@ -643,21 +634,6 @@ def nrd2mda_fast(fname, fmdaname, channel_list, max_pkts=-1, buffer_size=10000, 
         # Find number of channels from header
         hdr = hdr.split()
         channels = int(hdr[hdr.index('-NumADChannels') + 1])
-
-        # nrd packet format
-        nrd_packet = np.dtype([
-            ('stx', 'i'),
-            ('pkt_id', 'i'),
-            ('pkt_data_size', 'i'),
-            ('timestamp high', 'I'),  # Neuralynx timestamp is ... in its own 32 bit world
-            ('timestamp low', 'I'),
-            ('status', 'i'),
-            ('ttl', 'I'),
-            ('extra', '10i'),
-            ('data', '{:d}i'.format(channels)),
-            ('crc', 'i')
-        ])
-        # packet_size = nrd_packet.itemsize
 
         # Read in 32bit increments until the magic number is found
         pkt = f.read(4)
